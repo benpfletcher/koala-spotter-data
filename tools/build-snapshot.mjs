@@ -47,8 +47,33 @@ let next = 0;
 await Promise.all(Array.from({ length: CONCURRENCY }, async () => { while (next < pages) { const p = next++; await fetchPage(p); } }));
 console.log('fetched', records.length, 'records in', ((Date.now() - t0) / 1000) | 0, 's');
 
+// ---- extras from the BioNet OData feed (sex, breeding, time, habitat, method, reserve, council area, notes) ----
+const ODATA = 'https://data.bionet.nsw.gov.au/biosvcapp/odata/SpeciesSightings_CoreData';
+const extras = new Map();
+const sexes = new Map(), repros = new Map(), habitats = new Map(), protocols = new Map(), reserves = new Map(), counties = new Map();
+const clean = v => (v == null || v === '' || v === 'N/A' || v === 'Not supplied') ? null : String(v).trim();
+const toMin = t => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? (+m[1]) * 60 + (+m[2]) : null; };
+try {
+  let url = `${ODATA}?$filter=scientificName eq 'Phascolarctos cinereus'&$select=catalogNumber,sex,reproductiveCondition,eventTime,habitat,samplingProtocol,reserve,county,eventRemarks`;
+  let page = 0;
+  while (url) {
+    const j = await getJSON(url, 3); page++;
+    for (const r of j.value || []) {
+      const sex = clean(r.sex), rep = clean(r.reproductiveCondition), hab = clean(r.habitat), pro = clean(r.samplingProtocol), res = clean(r.reserve), cty = clean(r.county), rem = clean(r.eventRemarks), tm = toMin(r.eventTime);
+      if (!(sex || rep || hab || pro || res || cty || rem || tm != null)) continue;
+      extras.set(r.catalogNumber, [sex ? idx(sexes, sex) : null, rep ? idx(repros, rep) : null, tm, hab ? idx(habitats, hab) : null, pro ? idx(protocols, pro) : null, res ? idx(reserves, res) : null, cty ? idx(counties, cty) : null, rem ? rem.slice(0, 160) : null]);
+    }
+    url = j['@odata.nextLink'] || null;
+    console.log('  odata page', page, 'extras so far', extras.size);
+  }
+} catch (e) { console.log('OData extras unavailable this run:', e.message); }
+let withExtras = 0;
+for (const r of records) { const x = extras.get(r[8]); if (x) { while (x.length && x[x.length - 1] == null) x.pop(); r.push(...x); withExtras++; } }
+console.log('records with extras:', withExtras, '| lookups:', sexes.size, 'sex,', repros.size, 'breeding,', habitats.size, 'habitat,', protocols.size, 'methods,', reserves.size, 'reserves,', counties.size, 'council areas');
+
 // ---- write ----
-await rm(OUT, { recursive: true, force: true });
+// Never delete the output directory itself (it may be the repo checkout): clear only the files we publish.
+for (const f of ['p', 'a', 'meta.json', 'latest.json']) await rm(path.join(OUT, f), { recursive: true, force: true });
 await mkdir(path.join(OUT, 'p'), { recursive: true });
 const now = new Date(); const todayDays = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / DAY);
 const cut = y => { const d = new Date(now); d.setUTCFullYear(d.getUTCFullYear() - y); return Math.floor(d.getTime() / DAY); };
@@ -85,6 +110,7 @@ console.log('aggregate files:', afiles, 'total', (abytes / 1e6).toFixed(1), 'MB'
 const latest = records.filter(r => r[3] != null).sort((a, b) => b[3] - a[3]).slice(0, 400);
 await writeFile(path.join(OUT, 'latest.json'), JSON.stringify({ r: latest }));
 const meta = { built: now.toISOString(), snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
-  types: [...types.keys()], datasets: [...datasets.keys()] };
+  types: [...types.keys()], datasets: [...datasets.keys()], sexes: [...sexes.keys()], repros: [...repros.keys()], habitats: [...habitats.keys()], protocols: [...protocols.keys()], reserves: [...reserves.keys()], counties: [...counties.keys()],
+  record: ['OBJECTID', 'lon', 'lat', 'days', 'typeIdx', 'datasetIdx', 'count', 'accuracyM', 'catalogNumber', 'sexIdx', 'reproIdx', 'timeMinutes', 'habitatIdx', 'protocolIdx', 'reserveIdx', 'countyIdx', 'remarks'] };
 await writeFile(path.join(OUT, 'meta.json'), JSON.stringify(meta));
 console.log('done in', ((Date.now() - t0) / 1000) | 0, 's →', OUT);
