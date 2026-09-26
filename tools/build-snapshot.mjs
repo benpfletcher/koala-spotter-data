@@ -105,6 +105,27 @@ if (!bionetCount || !national.records.length || !national.summary.kept) {
   throw new Error('Incomplete Australia-wide snapshot; refusing to replace published data.');
 }
 
+// ---- collapse repeat records at one exact spot ----
+// Fixed acoustic recorders, camera traps and survey plots log every detection as a record: one recorder produced 3,974
+// records at a single point. For a spotter those are one site. Records that share coordinates, dataset and observation
+// type collapse into one, keeping the latest date and remembering how many there were and when they started
+// (record slots 17 = repeats, 18 = first day). Distinct sightings from different programs or of different kinds stay separate.
+{
+  const groups = new Map();
+  for (const r of records) { const k = `${r[1]}|${r[2]}|${r[5]}|${r[4]}`; (groups.get(k) || groups.set(k, []).get(k)).push(r); }
+  const collapsed = []; let removed = 0;
+  for (const g of groups.values()) {
+    if (g.length === 1) { collapsed.push(g[0]); continue; }
+    g.sort((a, b) => (b[3] ?? -1) - (a[3] ?? -1));
+    const rep = g[0]; const firsts = g.map(r => r[3]).filter(d => d != null);
+    while (rep.length < 17) rep.push(null);
+    rep[17] = g.length; rep[18] = firsts.length ? Math.min(...firsts) : null;
+    collapsed.push(rep); removed += g.length - 1;
+  }
+  console.log(`site collapse: ${records.length} records → ${collapsed.length} sightings (${removed} repeat detections folded into their site)`);
+  var rawTotal = records.length; records.length = 0; for (const r of collapsed) records.push(r);
+}
+
 // ---- write ----
 // Never delete the output directory itself (it may be the repo checkout): clear only the files we publish.
 for (const f of ['p', 'a', 'meta.json', 'latest.json', 'tiles.json']) await rm(path.join(OUT, f), { recursive: true, force: true });
@@ -144,8 +165,8 @@ console.log('aggregate files:', afiles, 'total', (abytes / 1e6).toFixed(1), 'MB'
 const latest = records.filter(r => r[3] != null).sort((a, b) => b[3] - a[3]).slice(0, 400);
 await writeFile(path.join(OUT, 'latest.json'), JSON.stringify({ b: BUILT, r: latest }));
 await writeFile(path.join(OUT, 'tiles.json'), JSON.stringify({ b: BUILT, cell: POINT_CELL, keys: [...ptiles.keys()] }));
-const meta = { built: BUILT, nationalTransformVersion: CACHE_VERSION, coverage: 'Australia', sources: { bionet: bionetCount, national: national.summary }, occupiedTiles: ptiles.size, snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
+const meta = { built: BUILT, rawTotal, nationalTransformVersion: CACHE_VERSION, coverage: 'Australia', sources: { bionet: bionetCount, national: national.summary }, occupiedTiles: ptiles.size, snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
   types: [...types.keys()], datasets: [...datasets.keys()], sexes: [...sexes.keys()], repros: [...repros.keys()], habitats: [...habitats.keys()], protocols: [...protocols.keys()], reserves: [...reserves.keys()], counties: [...counties.keys()],
-  record: ['OBJECTID', 'lon', 'lat', 'days', 'typeIdx', 'datasetIdx', 'count', 'accuracyM', 'catalogNumber', 'sexIdx', 'reproIdx', 'timeMinutes', 'habitatIdx', 'protocolIdx', 'reserveIdx', 'countyIdx', 'remarks'] };
+  record: ['OBJECTID', 'lon', 'lat', 'days', 'typeIdx', 'datasetIdx', 'count', 'accuracyM', 'catalogNumber', 'sexIdx', 'reproIdx', 'timeMinutes', 'habitatIdx', 'protocolIdx', 'reserveIdx', 'countyIdx', 'remarks', 'repeats', 'firstDays'] };
 await writeFile(path.join(OUT, 'meta.json'), JSON.stringify(meta));
 console.log('done in', ((Date.now() - t0) / 1000) | 0, 's →', OUT);
