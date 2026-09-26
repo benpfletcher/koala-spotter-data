@@ -46,6 +46,9 @@ async function fetchPage(p) {
 let next = 0;
 await Promise.all(Array.from({ length: CONCURRENCY }, async () => { while (next < pages) { const p = next++; await fetchPage(p); } }));
 console.log('fetched', records.length, 'records in', ((Date.now() - t0) / 1000) | 0, 's');
+// Deterministic lookup tables (sorted) so indices are stable across builds when the value sets are unchanged.
+function remap(m, records, col) { const sorted = [...m.keys()].sort(); const to = new Map(sorted.map((k, i) => [k, i])); const from = new Map([...m.entries()].map(([k, i]) => [i, to.get(k)])); for (const r of records) if (r[col] != null) r[col] = from.get(r[col]); m.clear(); sorted.forEach((k, i) => m.set(k, i)); }
+remap(types, records, 4); remap(datasets, records, 5);
 
 // ---- extras from the BioNet OData feed (sex, breeding, time, habitat, method, reserve, council area, notes) ----
 const ODATA = 'https://data.bionet.nsw.gov.au/biosvcapp/odata/SpeciesSightings_CoreData';
@@ -69,13 +72,14 @@ try {
 } catch (e) { console.log('OData extras unavailable this run:', e.message); }
 let withExtras = 0;
 for (const r of records) { const x = extras.get(r[8]); if (x) { while (x.length && x[x.length - 1] == null) x.pop(); r.push(...x); withExtras++; } }
+[[sexes, 9], [repros, 10], [habitats, 12], [protocols, 13], [reserves, 14], [counties, 15]].forEach(([m, col]) => remap(m, records, col));
 console.log('records with extras:', withExtras, '| lookups:', sexes.size, 'sex,', repros.size, 'breeding,', habitats.size, 'habitat,', protocols.size, 'methods,', reserves.size, 'reserves,', counties.size, 'council areas');
 
 // ---- write ----
 // Never delete the output directory itself (it may be the repo checkout): clear only the files we publish.
-for (const f of ['p', 'a', 'meta.json', 'latest.json']) await rm(path.join(OUT, f), { recursive: true, force: true });
+for (const f of ['p', 'a', 'meta.json', 'latest.json', 'tiles.json']) await rm(path.join(OUT, f), { recursive: true, force: true });
 await mkdir(path.join(OUT, 'p'), { recursive: true });
-const now = new Date(); const todayDays = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / DAY);
+const now = new Date(); const BUILT = now.toISOString(); const todayDays = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / DAY);
 const cut = y => { const d = new Date(now); d.setUTCFullYear(d.getUTCFullYear() - y); return Math.floor(d.getTime() / DAY); };
 const CUT = { y1: cut(1), y5: cut(5), y10: cut(10) };
 
@@ -83,7 +87,7 @@ const CUT = { y1: cut(1), y5: cut(5), y10: cut(10) };
 const ptiles = new Map();
 for (const r of records) { const k = `${Math.floor(r[1] / POINT_CELL)}_${Math.floor(r[2] / POINT_CELL)}`; (ptiles.get(k) || ptiles.set(k, []).get(k)).push(r); }
 let pbytes = 0, pmax = 0;
-for (const [k, rs] of ptiles) { const s = JSON.stringify({ r: rs }); pbytes += s.length; pmax = Math.max(pmax, s.length); await writeFile(path.join(OUT, 'p', k + '.json'), s); }
+for (const [k, rs] of ptiles) { const s = JSON.stringify({ b: BUILT, r: rs }); pbytes += s.length; pmax = Math.max(pmax, s.length); await writeFile(path.join(OUT, 'p', k + '.json'), s); }
 console.log('point tiles:', ptiles.size, 'total', (pbytes / 1e6).toFixed(1), 'MB, largest', (pmax / 1e3) | 0, 'KB');
 
 // aggregates per cell size: [cx, cy, n1, n5, n10, nAll, lonCentroid, latCentroid, latestDays]
@@ -97,19 +101,20 @@ for (let ci = 0; ci < AGG_CELLS.length; ci++) {
   }
   const row = c => [c.cx, c.cy, c.n1, c.n5, c.n10, c.n, +(c.sx / c.n).toFixed(5), +(c.sy / c.n).toFixed(5), c.latest];
   const dir = path.join(OUT, 'a', String(ci)); await mkdir(dir, { recursive: true });
-  if (ci <= AGG_SINGLE_MAX_IDX) { const s = JSON.stringify({ c: [...cells.values()].map(row) }); abytes += s.length; afiles++; await writeFile(path.join(dir, 'all.json'), s); }
+  if (ci <= AGG_SINGLE_MAX_IDX) { const s = JSON.stringify({ b: BUILT, c: [...cells.values()].map(row) }); abytes += s.length; afiles++; await writeFile(path.join(dir, 'all.json'), s); }
   else {
     const tiles = new Map();
     for (const c of cells.values()) { const k = `${Math.floor(c.cx * cell)}_${Math.floor(c.cy * cell)}`; (tiles.get(k) || tiles.set(k, []).get(k)).push(row(c)); }
-    for (const [k, rows] of tiles) { const s = JSON.stringify({ c: rows }); abytes += s.length; afiles++; await writeFile(path.join(dir, k + '.json'), s); }
+    for (const [k, rows] of tiles) { const s = JSON.stringify({ b: BUILT, c: rows }); abytes += s.length; afiles++; await writeFile(path.join(dir, k + '.json'), s); }
   }
   console.log(`agg cell ${cell}°: ${cells.size} cells`);
 }
 console.log('aggregate files:', afiles, 'total', (abytes / 1e6).toFixed(1), 'MB');
 // statewide latest (for regional/statewide list views)
 const latest = records.filter(r => r[3] != null).sort((a, b) => b[3] - a[3]).slice(0, 400);
-await writeFile(path.join(OUT, 'latest.json'), JSON.stringify({ r: latest }));
-const meta = { built: now.toISOString(), snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
+await writeFile(path.join(OUT, 'latest.json'), JSON.stringify({ b: BUILT, r: latest }));
+await writeFile(path.join(OUT, 'tiles.json'), JSON.stringify({ b: BUILT, cell: POINT_CELL, keys: [...ptiles.keys()] }));
+const meta = { built: BUILT, occupiedTiles: ptiles.size, snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
   types: [...types.keys()], datasets: [...datasets.keys()], sexes: [...sexes.keys()], repros: [...repros.keys()], habitats: [...habitats.keys()], protocols: [...protocols.keys()], reserves: [...reserves.keys()], counties: [...counties.keys()],
   record: ['OBJECTID', 'lon', 'lat', 'days', 'typeIdx', 'datasetIdx', 'count', 'accuracyM', 'catalogNumber', 'sexIdx', 'reproIdx', 'timeMinutes', 'habitatIdx', 'protocolIdx', 'reserveIdx', 'countyIdx', 'remarks'] };
 await writeFile(path.join(OUT, 'meta.json'), JSON.stringify(meta));
