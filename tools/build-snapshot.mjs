@@ -1,8 +1,9 @@
-// Builds a static snapshot of every NSW BioNet koala record into CDN-friendly tiles.
+// Builds a static snapshot of every koala record (NSW BioNet + national GBIF mirror of the other state atlases) into CDN-friendly tiles.
 // Usage: node tools/build-snapshot.mjs [outDir]   (default ../koala-spotter-2000/data)
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { fetchNational, DEFAULT_CACHE } from './fetch-national.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const OUT = process.argv[2] || path.join(ROOT, '..', 'koala-spotter-2000', 'data');
@@ -75,6 +76,31 @@ for (const r of records) { const x = extras.get(r[8]); if (x) { while (x.length 
 [[sexes, 9], [repros, 10], [habitats, 12], [protocols, 13], [reserves, 14], [counties, 15]].forEach(([m, col]) => remap(m, records, col));
 console.log('records with extras:', withExtras, '| lookups:', sexes.size, 'sex,', repros.size, 'breeding,', habitats.size, 'habitat,', protocols.size, 'methods,', reserves.size, 'reserves,', counties.size, 'council areas');
 
+// ---- national records (outside NSW) from GBIF, deduplicated against BioNet and across publishers ----
+// A duplicate is the same dated sighting published by two different programs (same date, position within ~10 m,
+// same count). Repeats inside one atlas are kept: surveys legitimately log several animals at one spot on one day,
+// and BioNet itself is published that way. Undated records are never merged, since there is no evidence they match.
+const fuzzy = r => r[3] == null ? null : `${r[3]}|${r[1].toFixed(4)}|${r[2].toFixed(4)}|${r[6] ?? ''}`;
+const seenBy = new Map(); for (const r of records) { const k = fuzzy(r); if (k && !seenBy.has(k)) seenBy.set(k, 'NSW BioNet Atlas'); }
+const bionetCount = records.length;
+let national = null;
+try {
+  national = await fetchNational(process.env.NATIONAL_CACHE || DEFAULT_CACHE);
+  let kept = 0, dupes = 0; const dupePairs = {};
+  for (const n of national.records) {
+    const rec = [String(n[0]), n[1], n[2], n[3], idx(types, n[4]), idx(datasets, n[5]), n[6], n[7], ''];
+    const k = fuzzy(rec); const first = k && seenBy.get(k);
+    if (first && first !== n[5]) { dupes++; const pk = `${first} → ${n[5]}`; dupePairs[pk] = (dupePairs[pk] || 0) + 1; continue; }
+    if (k && !first) seenBy.set(k, n[5]);
+    records.push(rec); kept++;
+  }
+  remap(types, records, 4); remap(datasets, records, 5);
+  const perDataset = {}; for (const d of Object.values(national.datasets)) perDataset[d.title] = { gbif: d.count, kept: d.kept, dropped: d.dropped };
+  national.summary = { source: 'GBIF', fetched: national.fetched, candidates: national.records.length, kept, droppedAsCrossSourceDuplicate: dupes, duplicatePairs: dupePairs, datasets: perDataset };
+  console.log(`national: ${national.records.length} candidates outside NSW, ${kept} added, ${dupes} dropped as the same dated sighting published by another source`);
+  console.log('  duplicate pairs:', Object.entries(dupePairs).sort((a, b) => b[1] - a[1]).slice(0, 6));
+} catch (e) { console.log('national records unavailable this run (NSW only):', e.message); }
+
 // ---- write ----
 // Never delete the output directory itself (it may be the repo checkout): clear only the files we publish.
 for (const f of ['p', 'a', 'meta.json', 'latest.json', 'tiles.json']) await rm(path.join(OUT, f), { recursive: true, force: true });
@@ -114,7 +140,7 @@ console.log('aggregate files:', afiles, 'total', (abytes / 1e6).toFixed(1), 'MB'
 const latest = records.filter(r => r[3] != null).sort((a, b) => b[3] - a[3]).slice(0, 400);
 await writeFile(path.join(OUT, 'latest.json'), JSON.stringify({ b: BUILT, r: latest }));
 await writeFile(path.join(OUT, 'tiles.json'), JSON.stringify({ b: BUILT, cell: POINT_CELL, keys: [...ptiles.keys()] }));
-const meta = { built: BUILT, occupiedTiles: ptiles.size, snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
+const meta = { built: BUILT, coverage: national ? 'Australia' : 'NSW', sources: { bionet: bionetCount, national: national ? national.summary : null }, occupiedTiles: ptiles.size, snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
   types: [...types.keys()], datasets: [...datasets.keys()], sexes: [...sexes.keys()], repros: [...repros.keys()], habitats: [...habitats.keys()], protocols: [...protocols.keys()], reserves: [...reserves.keys()], counties: [...counties.keys()],
   record: ['OBJECTID', 'lon', 'lat', 'days', 'typeIdx', 'datasetIdx', 'count', 'accuracyM', 'catalogNumber', 'sexIdx', 'reproIdx', 'timeMinutes', 'habitatIdx', 'protocolIdx', 'reserveIdx', 'countyIdx', 'remarks'] };
 await writeFile(path.join(OUT, 'meta.json'), JSON.stringify(meta));

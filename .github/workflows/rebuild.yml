@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Build snapshot from NSW BioNet
+      - name: Build snapshot from NSW BioNet + national atlases via GBIF
         run: node tools/build-snapshot.mjs out
       - name: Replace published files
         run: |
