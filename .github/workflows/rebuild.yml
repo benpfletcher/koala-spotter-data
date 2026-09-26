@@ -5,6 +5,9 @@ on:
   workflow_dispatch: {}
 permissions:
   contents: write
+concurrency:
+  group: koala-snapshot
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -15,6 +18,8 @@ jobs:
           node-version: 22
       - name: Build snapshot from NSW BioNet + national atlases via GBIF
         run: node tools/build-snapshot.mjs out
+      - name: Validate nationwide coverage before publication
+        run: node tools/validate-snapshot.mjs out .
       - name: Replace published files
         run: |
           rm -rf p a meta.json latest.json

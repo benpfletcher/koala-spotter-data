@@ -3,7 +3,7 @@
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { fetchNational, DEFAULT_CACHE } from './fetch-national.mjs';
+import { fetchNational, DEFAULT_CACHE, CACHE_VERSION } from './fetch-national.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const OUT = process.argv[2] || path.join(ROOT, '..', 'koala-spotter-2000', 'data');
@@ -95,11 +95,15 @@ try {
     records.push(rec); kept++;
   }
   remap(types, records, 4); remap(datasets, records, 5);
-  const perDataset = {}; for (const d of Object.values(national.datasets)) perDataset[d.title] = { gbif: d.count, kept: d.kept, dropped: d.dropped };
+  const perDataset = {}; for (const d of Object.values(national.datasets)) perDataset[d.title] = { gbif: d.count, kept: d.kept, dropped: d.dropped, fetched: d.fetched };
   national.summary = { source: 'GBIF', fetched: national.fetched, candidates: national.records.length, kept, droppedAsCrossSourceDuplicate: dupes, duplicatePairs: dupePairs, datasets: perDataset };
   console.log(`national: ${national.records.length} candidates outside NSW, ${kept} added, ${dupes} dropped as the same dated sighting published by another source`);
   console.log('  duplicate pairs:', Object.entries(dupePairs).sort((a, b) => b[1] - a[1]).slice(0, 6));
-} catch (e) { console.log('national records unavailable this run (NSW only):', e.message); }
+} catch (e) { throw new Error('National import failed; previous Australia-wide snapshot must be retained.', { cause: e }); }
+
+if (!bionetCount || !national.records.length || !national.summary.kept) {
+  throw new Error('Incomplete Australia-wide snapshot; refusing to replace published data.');
+}
 
 // ---- write ----
 // Never delete the output directory itself (it may be the repo checkout): clear only the files we publish.
@@ -140,7 +144,7 @@ console.log('aggregate files:', afiles, 'total', (abytes / 1e6).toFixed(1), 'MB'
 const latest = records.filter(r => r[3] != null).sort((a, b) => b[3] - a[3]).slice(0, 400);
 await writeFile(path.join(OUT, 'latest.json'), JSON.stringify({ b: BUILT, r: latest }));
 await writeFile(path.join(OUT, 'tiles.json'), JSON.stringify({ b: BUILT, cell: POINT_CELL, keys: [...ptiles.keys()] }));
-const meta = { built: BUILT, coverage: national ? 'Australia' : 'NSW', sources: { bionet: bionetCount, national: national ? national.summary : null }, occupiedTiles: ptiles.size, snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
+const meta = { built: BUILT, nationalTransformVersion: CACHE_VERSION, coverage: 'Australia', sources: { bionet: bionetCount, national: national.summary }, occupiedTiles: ptiles.size, snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
   types: [...types.keys()], datasets: [...datasets.keys()], sexes: [...sexes.keys()], repros: [...repros.keys()], habitats: [...habitats.keys()], protocols: [...protocols.keys()], reserves: [...reserves.keys()], counties: [...counties.keys()],
   record: ['OBJECTID', 'lon', 'lat', 'days', 'typeIdx', 'datasetIdx', 'count', 'accuracyM', 'catalogNumber', 'sexIdx', 'reproIdx', 'timeMinutes', 'habitatIdx', 'protocolIdx', 'reserveIdx', 'countyIdx', 'remarks'] };
 await writeFile(path.join(OUT, 'meta.json'), JSON.stringify(meta));

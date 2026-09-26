@@ -1,11 +1,21 @@
 # Koala Spotter 2000 — data snapshot
 
-Static, CDN-served snapshot of every koala record in the NSW BioNet Atlas (CC BY 4.0, © NSW DCCEEW), rebuilt daily by
-GitHub Actions and served via GitHub Pages for https://koala-spotter-2000.vercel.app.
+Static, CDN-served snapshot combining NSW BioNet records with national wildlife atlases and other publishers via GBIF.
+GitHub Actions attempts a refresh daily and serves successful snapshots through GitHub Pages for https://koala-spotter-2000.vercel.app.
+If a national import fails, or validation detects missing coverage or a loss of more than 10% of either source,
+the previous published snapshot is retained. Concurrent workflow runs are serialized.
 
 - `meta.json` — build time, range cut-offs, observation-type and dataset lookup tables
 - `p/{x}_{y}.json` — 0.05° point tiles: `[OBJECTID, lon, lat, daysSinceEpoch, typeIdx, datasetIdx, count, accuracyM, catalogNumber]`
 - `a/{i}/…` — exact per-cell counts for cell sizes 2°…0.01°: `[cx, cy, n1y, n5y, n10y, nAll, lonCentroid, latCentroid, latestDays]`
-- `latest.json` — the 400 most recent records state-wide
+- `latest.json` — the 400 most recent records nationwide
+- `national-cache.json` — transformed GBIF records, with cache version and per-dataset retrieval timestamps; unchanged counts only allow reuse for 24 hours
+
+National records use the neutral observation type `Record` unless the retained source information establishes
+a more specific condition. Explicit roadkill datasets use `Road kill`. No verification status is invented.
+Source record IDs are strings for GBIF and numbers for BioNet. `nationalTransformVersion` identifies the transformation in metadata.
+
+Before replacing published data, run `node tools/validate-snapshot.mjs out .` against the candidate and current snapshot.
+Build timestamps describe snapshot generation; per-dataset `fetched` timestamps describe source retrieval.
 
 Rebuild locally: `node tools/build-snapshot.mjs .`

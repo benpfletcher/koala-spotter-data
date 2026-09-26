@@ -12,13 +12,15 @@
 //      and within this set collapses the same sighting published by two programs.
 //
 // Usage: node tools/fetch-national.mjs [cacheFile]        (default: ../national-cache.json next to tools/)
-//   Reuses the cache for any dataset whose GBIF record count is unchanged; refetches the rest.
-import { readFile, writeFile } from 'node:fs/promises';
+//   Reuses unchanged datasets for at most 24 hours; refreshes older or differently transformed data.
+import { readFile, writeFile, rename } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_CACHE = path.join(ROOT, '..', 'national-cache.json');
+export const CACHE_VERSION = 2;
+export const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const API = 'https://api.gbif.org/v1';
 const TAXON = 2440012;                                   // Phascolarctos cinereus (Goldfuss, 1817)
 const SKIP_DATASETS = new Set([
@@ -64,7 +66,18 @@ async function bands(dsKey, s, n, total) {
   return out;
 }
 
-function compact(o, title) {
+// basisOfRecord does not establish whether an animal was alive, heard, or photographed.
+// Only these explicitly named roadkill sources establish a condition in our compact data.
+export function nationalObservationType(title) {
+  return /^(B4C Road Kill Map|Roadkill)$/i.test(String(title).trim()) ? 'Road kill' : 'Record';
+}
+export function reusableDataset(prev, ds, version, now = Date.now()) {
+  const age = now - Date.parse(prev?.fetched);
+  return version === CACHE_VERSION && prev?.count === ds.count && prev.title === ds.title &&
+    Array.isArray(prev.records) && Number.isFinite(age) && age >= 0 && age < CACHE_MAX_AGE_MS;
+}
+
+export function compact(o, title) {
   const lat = o.decimalLatitude, lon = o.decimalLongitude;
   if (typeof lat !== 'number' || typeof lon !== 'number' || lon < AU.w || lon > AU.e || lat < AU.s || lat > AU.n) return { drop: 'coords' };
   if (!SIGHTING_BASIS.has(o.basisOfRecord)) return { drop: 'basis' };
@@ -74,7 +87,7 @@ function compact(o, title) {
   const days = m ? Math.floor(Date.UTC(+m[1], +m[2] - 1, +m[3]) / DAY) : null;
   const cnt = Number.isInteger(o.individualCount) && o.individualCount > 0 ? o.individualCount : null;
   const acc = typeof o.coordinateUncertaintyInMeters === 'number' ? Math.round(o.coordinateUncertaintyInMeters) : null;
-  const type = o.basisOfRecord === 'MACHINE_OBSERVATION' ? 'Camera' : 'Observed';
+  const type = nationalObservationType(title);
   return { rec: [o.key, +lon.toFixed(5), +lat.toFixed(5), days, type, title, cnt, acc] };
 }
 
@@ -99,20 +112,24 @@ export async function fetchNational(cacheFile = DEFAULT_CACHE, log = console.log
   let cache = null;
   try { cache = JSON.parse(await readFile(cacheFile, 'utf8')); } catch { cache = null; }
   const datasets = await listDatasets();
+  if (!datasets.length) throw new Error('National dataset list is empty; retaining the previous snapshot.');
   log(`GBIF: ${datasets.length} datasets outside the skipped ones, ${datasets.reduce((a, d) => a + d.count, 0)} records before filtering`);
-  const out = { source: 'GBIF', taxonKey: TAXON, fetched: new Date().toISOString(), datasets: {}, records: [] };
+  const out = { version: CACHE_VERSION, source: 'GBIF', taxonKey: TAXON, fetched: new Date().toISOString(), datasets: {}, records: [] };
   let reused = 0, refetched = 0;
   for (const ds of datasets) {
     const prev = cache && cache.datasets && cache.datasets[ds.key];
-    if (prev && prev.count === ds.count && Array.isArray(prev.records)) { out.datasets[ds.key] = prev; reused++; continue; }
+    if (reusableDataset(prev, ds, cache?.version)) { out.datasets[ds.key] = prev; reused++; continue; }
     log(`  fetching ${ds.title} (${ds.count} records)`);
     const r = await fetchDataset(ds, log);
     out.datasets[ds.key] = { title: ds.title, count: ds.count, fetched: out.fetched, kept: r.records.length, seen: r.fetched, dropped: r.dropped, records: r.records };
     refetched++;
   }
   for (const d of Object.values(out.datasets)) out.records.push(...d.records);
+  if (!out.records.length) throw new Error('National import returned no records; retaining the previous snapshot.');
   const bytesSafe = { ...out, records: undefined };
-  await writeFile(cacheFile, JSON.stringify(bytesSafe));
+  const temp = `${cacheFile}.tmp`;
+  await writeFile(temp, JSON.stringify(bytesSafe));
+  await rename(temp, cacheFile);
   log(`national cache: ${out.records.length} records (${reused} datasets reused, ${refetched} refetched) → ${cacheFile}`);
   return out;
 }
