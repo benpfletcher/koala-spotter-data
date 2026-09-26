@@ -30,14 +30,14 @@ const t0 = Date.now();
 const count = (await getJSON(`${URL_Q}?${qs({ where: WHERE, returnCountOnly: 'true', f: 'json' })}`)).count;
 console.log('records:', count);
 const pages = Math.ceil(count / PAGE);
-const records = []; let done = 0;
+const records = []; const sourceDates = new Map(); let done = 0;
 const types = new Map(), datasets = new Map();
 const idx = (m, v) => { v = v || ''; if (!m.has(v)) m.set(v, m.size); return m.get(v); };
 async function fetchPage(p) {
   const j = await getJSON(`${URL_Q}?${qs({ where: WHERE, outFields: FIELDS, orderByFields: 'OBJECTID', resultOffset: String(p * PAGE), resultRecordCount: String(PAGE), outSR: '4326', geometryPrecision: '5', returnGeometry: 'true', f: 'geojson' })}`);
   for (const f of j.features || []) {
     if (!f.geometry || !Array.isArray(f.geometry.coordinates)) continue;
-    const a = f.properties; const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(a.eventDate || '');
+    const a = f.properties; sourceDates.set(a.OBJECTID, a.eventDate || ''); const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(a.eventDate || '');
     const days = m ? Math.floor(Date.UTC(+m[1], +m[2] - 1, +m[3]) / DAY) : null;
     const [lon, lat] = f.geometry.coordinates;
     records.push([a.OBJECTID, +lon.toFixed(5), +lat.toFixed(5), days, idx(types, a.observationType), idx(datasets, a.datasetName), a.individualCount ?? null, a.coordinateUncertaintyInMeters != null ? Math.round(a.coordinateUncertaintyInMeters) : null, a.catalogNumber || '']);
@@ -74,6 +74,7 @@ try {
 let withExtras = 0;
 for (const r of records) { const x = extras.get(r[8]); if (x) { while (x.length && x[x.length - 1] == null) x.pop(); r.push(...x); withExtras++; } }
 [[sexes, 9], [repros, 10], [habitats, 12], [protocols, 13], [reserves, 14], [counties, 15]].forEach(([m, col]) => remap(m, records, col));
+for (const r of records) r[19] = sourceDates.get(r[0]) || null;
 console.log('records with extras:', withExtras, '| lookups:', sexes.size, 'sex,', repros.size, 'breeding,', habitats.size, 'habitat,', protocols.size, 'methods,', reserves.size, 'reserves,', counties.size, 'council areas');
 
 // ---- national records (outside NSW) from GBIF, deduplicated against BioNet and across publishers ----
@@ -89,6 +90,7 @@ try {
   let kept = 0, dupes = 0; const dupePairs = {};
   for (const n of national.records) {
     const rec = [String(n[0]), n[1], n[2], n[3], idx(types, n[4]), idx(datasets, n[5]), n[6], n[7], ''];
+    rec[19] = n[8] || null;
     const k = fuzzy(rec); const first = k && seenBy.get(k);
     if (first && first !== n[5]) { dupes++; const pk = `${first} → ${n[5]}`; dupePairs[pk] = (dupePairs[pk] || 0) + 1; continue; }
     if (k && !first) seenBy.set(k, n[5]);
@@ -105,26 +107,7 @@ if (!bionetCount || !national.records.length || !national.summary.kept) {
   throw new Error('Incomplete Australia-wide snapshot; refusing to replace published data.');
 }
 
-// ---- collapse repeat records at one exact spot ----
-// Fixed acoustic recorders, camera traps and survey plots log every detection as a record: one recorder produced 3,974
-// records at a single point. For a spotter those are one site. Records that share coordinates, dataset and observation
-// type collapse into one, keeping the latest date and remembering how many there were and when they started
-// (record slots 17 = repeats, 18 = first day). Distinct sightings from different programs or of different kinds stay separate.
-{
-  const groups = new Map();
-  for (const r of records) { const k = `${r[1]}|${r[2]}|${r[5]}|${r[4]}`; (groups.get(k) || groups.set(k, []).get(k)).push(r); }
-  const collapsed = []; let removed = 0;
-  for (const g of groups.values()) {
-    if (g.length === 1) { collapsed.push(g[0]); continue; }
-    g.sort((a, b) => (b[3] ?? -1) - (a[3] ?? -1));
-    const rep = g[0]; const firsts = g.map(r => r[3]).filter(d => d != null);
-    while (rep.length < 17) rep.push(null);
-    rep[17] = g.length; rep[18] = firsts.length ? Math.min(...firsts) : null;
-    collapsed.push(rep); removed += g.length - 1;
-  }
-  console.log(`site collapse: ${records.length} records → ${collapsed.length} sightings (${removed} repeat detections folded into their site)`);
-  var rawTotal = records.length; records.length = 0; for (const r of collapsed) records.push(r);
-}
+// Keep individual records and dates intact. Repeated sites are grouped only in the client list.
 
 // ---- write ----
 // Never delete the output directory itself (it may be the repo checkout): clear only the files we publish.
@@ -165,8 +148,8 @@ console.log('aggregate files:', afiles, 'total', (abytes / 1e6).toFixed(1), 'MB'
 const latest = records.filter(r => r[3] != null).sort((a, b) => b[3] - a[3]).slice(0, 400);
 await writeFile(path.join(OUT, 'latest.json'), JSON.stringify({ b: BUILT, r: latest }));
 await writeFile(path.join(OUT, 'tiles.json'), JSON.stringify({ b: BUILT, cell: POINT_CELL, keys: [...ptiles.keys()] }));
-const meta = { built: BUILT, rawTotal, nationalTransformVersion: CACHE_VERSION, coverage: 'Australia', sources: { bionet: bionetCount, national: national.summary }, occupiedTiles: ptiles.size, snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
+const meta = { built: BUILT, nationalTransformVersion: CACHE_VERSION, coverage: 'Australia', sources: { bionet: bionetCount, national: national.summary }, occupiedTiles: ptiles.size, snapshotDate: now.toISOString().slice(0, 10), todayDays, total: records.length, cut: CUT, pointCell: POINT_CELL, aggCells: AGG_CELLS, aggSingleMaxIdx: AGG_SINGLE_MAX_IDX, aggTile: 1,
   types: [...types.keys()], datasets: [...datasets.keys()], sexes: [...sexes.keys()], repros: [...repros.keys()], habitats: [...habitats.keys()], protocols: [...protocols.keys()], reserves: [...reserves.keys()], counties: [...counties.keys()],
-  record: ['OBJECTID', 'lon', 'lat', 'days', 'typeIdx', 'datasetIdx', 'count', 'accuracyM', 'catalogNumber', 'sexIdx', 'reproIdx', 'timeMinutes', 'habitatIdx', 'protocolIdx', 'reserveIdx', 'countyIdx', 'remarks', 'repeats', 'firstDays'] };
+  record: ['OBJECTID', 'lon', 'lat', 'days', 'typeIdx', 'datasetIdx', 'count', 'accuracyM', 'catalogNumber', 'sexIdx', 'reproIdx', 'timeMinutes', 'habitatIdx', 'protocolIdx', 'reserveIdx', 'countyIdx', 'remarks', 'reserved17', 'reserved18', 'sourceDate'] };
 await writeFile(path.join(OUT, 'meta.json'), JSON.stringify(meta));
 console.log('done in', ((Date.now() - t0) / 1000) | 0, 's →', OUT);

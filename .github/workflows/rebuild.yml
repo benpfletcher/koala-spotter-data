@@ -20,6 +20,8 @@ jobs:
         run: node tools/build-snapshot.mjs out
       - name: Validate nationwide coverage before publication
         run: node tools/validate-snapshot.mjs out .
+      - name: Verify every tile, record ID and aggregate count
+        run: node tools/audit-snapshot.mjs out
       - name: Replace published files
         run: |
           rm -rf p a meta.json latest.json

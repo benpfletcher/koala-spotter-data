@@ -19,7 +19,7 @@ import path from 'node:path';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_CACHE = path.join(ROOT, '..', 'national-cache.json');
-export const CACHE_VERSION = 2;
+export const CACHE_VERSION = 3;
 export const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const API = 'https://api.gbif.org/v1';
 const TAXON = 2440012;                                   // Phascolarctos cinereus (Goldfuss, 1817)
@@ -88,7 +88,7 @@ export function compact(o, title) {
   const cnt = Number.isInteger(o.individualCount) && o.individualCount > 0 ? o.individualCount : null;
   const acc = typeof o.coordinateUncertaintyInMeters === 'number' ? Math.round(o.coordinateUncertaintyInMeters) : null;
   const type = nationalObservationType(title);
-  return { rec: [o.key, +lon.toFixed(5), +lat.toFixed(5), days, type, title, cnt, acc] };
+  return { rec: [o.key, +lon.toFixed(5), +lat.toFixed(5), days, type, title, cnt, acc, o.eventDate || null] };
 }
 
 async function fetchDataset(ds, log) {
