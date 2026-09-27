@@ -19,3 +19,17 @@ Before replacing published data, run `node tools/validate-snapshot.mjs out .` ag
 Build timestamps describe snapshot generation; per-dataset `fetched` timestamps describe source retrieval.
 
 Rebuild locally: `node tools/build-snapshot.mjs .`
+
+
+Enrichment (transform v4): compact row index 20 contains `sourceDetail` (original identifiers,
+project, method, notes, demographics and licensed photos where available). Exact WildNet IDs
+are matched through ALA, then public Queensland sighting dates replace missing/broad GBIF dates;
+the GBIF date and survey interval remain in the detail object. Coordinates remain GBIF WGS84.
+`wildnet-detail-cache.json` persists the complete ID crosswalk, public date feed and bounded detail
+responses. Each daily build fetches up to 500 missing detail responses, newest first, then refreshes
+responses older than 30 days after the backlog. Unknown methods stay unknown; hospital records
+never imply injury or death. The first release enriches existing snapshot IDs using
+`tools/enrich-snapshot.mjs`; subsequent daily builds continue the normal source refresh.
+
+`WILDNET_DETAIL_LIMIT=0` applies cached evidence without requesting more individual records.
+Every build checks complete crosswalk paging; incomplete enrichment aborts publication.
