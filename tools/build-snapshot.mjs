@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { fetchNational, DEFAULT_CACHE, CACHE_VERSION } from './fetch-national.mjs';
 import { enrichWildnet, WILDNET_KEY } from './enrich-wildnet.mjs';
+import { buildKoalaNames } from './build-koala-names.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const OUT = process.argv[2] || path.join(ROOT, '..', 'koala-spotter-2000', 'data');
@@ -89,6 +90,10 @@ let national = null;
 try {
   national = await fetchNational(process.env.NATIONAL_CACHE || DEFAULT_CACHE);
   national.wildnet = await enrichWildnet(national.datasets[WILDNET_KEY]?.records || []);
+  // Names are optional context, never a reason to drop the national occurrence import.
+  const names = await buildKoalaNames(national.records).catch(e => { console.warn('Names unavailable:', e.message); return {version:1,names:{}}; });
+  await mkdir(OUT, {recursive:true});
+  await writeFile(path.join(OUT, 'koala-names.json'), JSON.stringify(names));
   let kept = 0, dupes = 0; const dupePairs = {};
   for (const n of national.records) {
     const rec = [String(n[0]), n[1], n[2], n[3], idx(types, n[4]), idx(datasets, n[5]), n[6], n[7], ''];
