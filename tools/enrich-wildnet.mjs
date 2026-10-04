@@ -9,10 +9,14 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const WILDNET_KEY = 'e4473544-f4cd-4429-b791-39d6e1fdb0a4';
 const API = 'https://wildnet-pub.science-data.qld.gov.au/api/v1';
 const DAY = 86400000;
+// ALA rate-limits anonymous bursts with 403/429: identify the client and wait properly before retrying.
+const HEADERS = {'User-Agent':'koala-spotter-data/1.0 (+https://github.com/benpfletcher/koala-spotter-data; benpfletcher@gmail.com)',Accept:'application/json'};
+const pause = ms => new Promise(r=>setTimeout(r,ms));
 async function json(url) {
   for(let i=0;;i++) {
-    try { const r=await fetch(url,{signal:AbortSignal.timeout(45000)}); if(!r.ok)throw Error(`HTTP ${r.status}: ${url}`); return await r.json(); }
-    catch(e) { if(i===3)throw e; await new Promise(r=>setTimeout(r,1000*(i+1))); }
+    let limited=false;
+    try { const r=await fetch(url,{headers:HEADERS,signal:AbortSignal.timeout(45000)}); limited=r.status===403||r.status===429; if(!r.ok)throw Error(`HTTP ${r.status}: ${url}`); return await r.json(); }
+    catch(e) { if(i===(limited?5:3))throw e; await pause(limited?30000*(i+1):1000*(i+1)); }
   }
 }
 const BULK_FIELDS = ['sighting_id','taxon_id','restricted_record','sighting_date','project_name','src_name','site_visit_start_date','site_visit_end_date'];
@@ -55,21 +59,27 @@ export async function enrichWildnet(rows, cacheFile=path.join(ROOT,'..','wildnet
   const fresh=cache.fetched && Date.now()-Date.parse(cache.fetched)<DAY;
   if(!fresh) {
     // UUID prefix partitions stay below ALA's deep paging limit. ALA accepts 100 rows/page.
-    const crosswalk={}; let next=0;
-    await Promise.all(Array.from({length:3},async()=>{
+    let crosswalk={}; let next=0;
+    try { await Promise.all(Array.from({length:3},async()=>{
       while(next<256) {
         const prefix=(next++).toString(16).padStart(2,'0');let total=Infinity;const found=new Set();
         for(let start=0;start<total;start+=100) {
           const q=new URLSearchParams({q:'taxon_name:"Phascolarctos cinereus"',pageSize:'100',startIndex:String(start),fl:'id,occurrenceID',sort:'id',dir:'asc'});
           q.append('fq','data_resource_uid:dr1132');q.append('fq',`id:${prefix}*`);
-          const j=await json('https://biocache-ws.ala.org.au/ws/occurrences/search?'+q);total=j.totalRecords;
+          const j=await json('https://biocache-ws.ala.org.au/ws/occurrences/search?'+q);total=j.totalRecords;await pause(120);
           if(!Number.isInteger(total)||total>1000||!j.occurrences?.length)throw Error(`Incomplete ALA crosswalk: ${prefix} offset ${start}, total ${total}, page ${j.occurrences?.length}`);
           for(const o of j.occurrences) {const m=/^urn:catalog:QGov:DES:WildNet:(\d+)$/.exec(o.occurrenceID||'');if(!m||!o.uuid?.startsWith(prefix))throw Error('Unexpected WildNet identifier');crosswalk[o.uuid]=+m[1];found.add(o.uuid);}
         }
         if(found.size!==total)throw Error(`ALA paging mismatch for ${prefix}: ${found.size}/${total}`);
         if(parseInt(prefix,16)%16===0)log(`WildNet identifiers: prefix ${prefix}, ${Object.keys(crosswalk).length} exact matches`);
       }
-    }));
+    })); }
+    catch(e) {
+      // WildNet identifiers never change, so the last complete crosswalk stays valid when ALA refuses the crawl.
+      // New records it lacks are caught by the 98% exact-match check below.
+      next=256; if(!Object.keys(cache.crosswalk||{}).length)throw e;
+      log(`ALA crosswalk unavailable (${e.message.slice(0,80)}); reusing ${Object.keys(cache.crosswalk).length} saved identifiers`); crosswalk=cache.crosswalk;
+    }
     const records={};let after=0;
     for(;;) {
       const list=await json(`${API}/sightings?taxon_id=860&page_size=5000&after_sighting_id=${after}`);
