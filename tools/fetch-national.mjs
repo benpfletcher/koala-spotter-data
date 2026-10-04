@@ -20,7 +20,7 @@ import { observationType, nationalDetail } from './observation-detail.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_CACHE = path.join(ROOT, '..', 'national-cache.json');
-export const CACHE_VERSION = 4;
+export const CACHE_VERSION = 5;
 export const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const API = 'https://api.gbif.org/v1';
 const TAXON = 2440012;                                   // Phascolarctos cinereus (Goldfuss, 1817)

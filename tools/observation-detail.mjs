@@ -28,23 +28,30 @@ export function observationType(o, title = '') {
 export function safeURL(value) {
   try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password ? u.href : null; } catch { return null; }
 }
+// Label a photo's rights as the source publishes them. Returns null unless it is a recognised Creative Commons licence.
+const CC_LABEL = { by: 'CC BY', 'by-sa': 'CC BY-SA', 'by-nc': 'CC BY-NC', 'by-nc-sa': 'CC BY-NC-SA', 'by-nd': 'CC BY-ND', 'by-nc-nd': 'CC BY-NC-ND' };
 export function photoLicense(value) {
   const s = String(value || '').trim().toLowerCase();
   if (/^cc0(?:[- ]1\.0)?$/.test(s)) return 'CC0';
-  if (/^cc[- ]by(?:[- ][1-4]\.0)?$/.test(s)) return 'CC BY';
-  if (/^cc[- ]by[- ]sa(?:[- ][1-4]\.0)?$/.test(s)) return 'CC BY-SA';
+  const short = /^cc[- ](by(?:[- ](?:nc|sa|nd)){0,2})(?:[- ][1-4]\.0)?$/.exec(s);
+  if (short) return CC_LABEL[short[1].replace(/ /g, '-')] || null;
+  // Some providers spell the licence out: "Creative Commons Attribution 3.0".
+  if (/^creative commons attribution\b/.test(s)) return CC_LABEL['by' + (/non-?commercial/.test(s) ? '-nc' : '') + (/share-?alike/.test(s) ? '-sa' : /no-?deriv/.test(s) ? '-nd' : '')] || null;
   try {
     const u = new URL(s);
     if (!['http:', 'https:'].includes(u.protocol) || !/^(www\.)?creativecommons\.org$/.test(u.hostname)) return null;
     if (/^\/publicdomain\/zero\/1\.0(?:\/|$)/.test(u.pathname)) return 'CC0';
-    const m = /^\/licenses\/(by|by-sa)\/[1-4]\.0(?:\/|$)/.exec(u.pathname);
-    return m ? (m[1] === 'by' ? 'CC BY' : 'CC BY-SA') : null;
+    const m = /^\/licenses\/(by(?:-(?:nc|sa|nd)){0,2})\/[1-4]\.0(?:\/|$)/.exec(u.pathname);
+    return m ? CC_LABEL[m[1]] || null : null;
   } catch { return null; }
 }
 export function nationalDetail(o, title) {
+  // Keep every published photo. Rights are shown as the source states them, never upgraded to a licence it did not give.
   const photos = (o.media || []).filter(m => m.type === 'StillImage').flatMap(m => {
-    const url = safeURL(m.identifier), licence = photoLicense(m.license), creator = clean(m.creator) || clean(m.rightsHolder);
-    return url && licence && (creator || licence === 'CC0') ? [{ url, license: licence, licenseUrl: /^http:\/\/creativecommons\.org\//i.test(m.license || '') ? m.license.replace(/^http:/i, 'https:') : safeURL(m.license), creator: creator || 'Not supplied' }] : [];
+    const url = safeURL(m.identifier), cc = photoLicense(m.license), creator = clean(m.creator) || clean(m.rightsHolder);
+    if (!url) return [];
+    const ccUrl = cc && /^https?:\/\/(www\.)?creativecommons\.org\//i.test(m.license || '') ? m.license.replace(/^http:/i, 'https:') : null;
+    return [{ url, license: cc || (clean(m.license) ? 'All rights reserved' : 'Licence not stated'), licenseUrl: ccUrl, creator: creator || 'Not supplied' }];
   });
   const notes = [...new Set([clean(o.occurrenceRemarks), clean(o.eventRemarks)].filter(Boolean))].join('\n');
   return Object.fromEntries(Object.entries({
